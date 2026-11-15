@@ -1,0 +1,109 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Session Scribe · Review</title><link rel="stylesheet" href="/app.css"><script src="/common.js"></script></head><body>
+<header><h1><a href="/index.html">Session Scribe</a> · Review <span id="sid"></span></h1>
+  <span id="meta" class="muted"></span>
+  <div class="row" style="margin-left:auto">
+    <button class="primary" id="save">Save…</button>
+    <select id="export"><option value="">Export…</option><option value="log">Session log</option><option value="log-player-safe">Log (player-safe)</option><option value="transcript">Transcript</option><option value="notes">Review notes</option></select>
+    <button class="danger" id="delaudio" title="R21: keep transcript and log, free disk">Delete audio</button>
+  </div></header>
+<div id="warn" style="padding:0 16px"></div>
+<main class="review">
+  <div class="pane card" id="draft"></div>
+  <div class="card"><div class="row"><audio id="player" controls preload="none" style="flex:1"></audio></div>
+    <div class="row" style="margin:8px 0"><input id="find" placeholder="Search transcript" style="flex:1"><label><input type="checkbox" id="hidett"> Hide table talk</label></div>
+    <div class="pane" id="transcript"></div></div>
+</main>
+<dialog id="dlg"><h2>Save session log</h2><p class="muted">Nothing is written until you confirm. Changes against the last saved version:</p>
+  <div id="problems"></div><pre class="diff" id="diff"></pre>
+  <div class="row"><button class="primary" id="confirm">Save</button><button id="cancel">Cancel</button></div></dialog>
+<script>
+const sid = new URLSearchParams(location.search).get('sid');
+const TITLES = {prep: 'Prep', session_notes: 'Session Notes', npc_changes: 'NPC Changes/Statuses', unresolved_threads: 'Unresolved Threads', verify: '[VERIFY]'};
+let draft, sections, transcript, lineEls = {}, base = null, dirty = false;
+const $ = id => document.getElementById(id);
+
+function play(t, track) {
+  const segs = transcript.segments.filter(s => (s.track || null) === (track || null));
+  const seg = [...(segs.length ? segs : transcript.segments)].reverse().find(s => t >= s.offset - 0.01);
+  if (!seg || draft.audio_deleted) return;
+  const p = $('player'), src = `/api/sessions/${sid}/audio/${seg.file}`;
+  const go = () => { p.currentTime = Math.max(0, t - seg.offset - 1); p.play(); };
+  if (!p.src.endsWith(src)) { p.src = src; p.addEventListener('loadedmetadata', go, {once: true}); p.load(); } else go();
+}
+function showLines(ids) {
+  Object.values(lineEls).forEach(e => e.classList.remove('hl'));
+  ids.forEach(id => lineEls[id] && lineEls[id].classList.add('hl'));
+  const first = lineEls[ids[0]]; if (first) first.scrollIntoView({block: 'center', behavior: 'smooth'});
+}
+function renderDraft() {
+  const d = $('draft'); d.innerHTML = '';
+  if (draft.check && draft.check.length) d.append(el('div', {class: 'banner'}, 'Template check: ' + draft.check.join('; ')));
+  for (const [key, title] of Object.entries(TITLES)) {
+    d.append(el('h2', {}, title));
+    (sections[key] || []).forEach((it, i) => {
+      const ta = el('textarea', {rows: Math.max(1, Math.ceil(it.text.length / 70))});
+      ta.value = it.text; ta.oninput = () => { it.text = ta.value; dirty = true; };
+      const cite = it.lines && it.lines.length
+        ? el('button', {class: 'cite', title: 'Show and play the supporting lines', onclick: () => { showLines(it.lines); const ln = transcript.lines.find(l => l.id === it.lines[0]); if (ln) play(ln.start, ln.speaker); }}, it.start != null ? fmt(it.start) : it.lines[0])
+        : el('span', {class: 'cite muted', title: 'Added by you; no transcript citation'}, 'DM');
+      d.append(el('div', {class: 'item'}, cite, ta, el('button', {title: 'Remove', onclick: () => { sections[key].splice(i, 1); dirty = true; renderDraft(); }}, '×')));
+    });
+    d.append(el('button', {class: 'add', onclick: () => { (sections[key] = sections[key] || []).push({id: 'D' + Date.now(), text: '', lines: []}); dirty = true; renderDraft(); }}, '+ add'));
+  }
+  if (draft.flagged && draft.flagged.length) {
+    d.append(el('h2', {}, 'Left out: no supporting transcript lines'));
+    d.append(el('ul', {class: 'muted'}, draft.flagged.map(f => el('li', {}, f.text))));
+  }
+}
+function renderTranscript() {
+  const t = $('transcript'); t.innerHTML = ''; lineEls = {};
+  const q = $('find').value.toLowerCase(), hide = $('hidett').checked;
+  const bms = [...transcript.bookmarks].sort((a, b) => a.t - b.t);
+  for (const ln of transcript.lines) {
+    while (bms.length && bms[0].t <= ln.start) { const b = bms.shift(); t.append(el('div', {class: 'bm'}, `★ ${fmt(b.t)} ${b.label}`)); }
+    if (hide && ln.table_talk) continue;
+    if (q && !ln.text.toLowerCase().includes(q)) continue;
+    const who = ln.speaker ? (transcript.speakers[ln.speaker] || ln.speaker) : null;
+    const e = el('div', {class: 'line' + (ln.table_talk ? ' tt' : ''), title: [ln.table_talk ? 'Table talk: kept here, left out of the log' : '', ln.raw ? `Speech model heard: "${ln.raw}" (spelling matched to the glossary)` : ''].filter(Boolean).join('\n')},
+      el('span', {class: 'ts'}, fmt(ln.start)),
+      who ? el('span', {class: 'spk', title: 'Rename speaker', onclick: ev => { ev.stopPropagation(); rename(ln.speaker); }}, who + ': ') : null, ln.text);
+    e.onclick = () => play(ln.start, ln.speaker);
+    lineEls[ln.id] = e; t.append(e);
+  }
+}
+async function rename(raw) {
+  const name = prompt(`Rename speaker "${transcript.speakers[raw] || raw}" everywhere to:`); if (!name) return;
+  transcript.speakers = await api(`/api/sessions/${sid}/speakers`, {json: {raw, name}}); renderTranscript();
+}
+$('find').oninput = renderTranscript; $('hidett').onchange = renderTranscript;
+$('save').onclick = async () => {
+  const r = await api(`/api/sessions/${sid}/preview-save`, {json: {sections}});
+  base = r.base; $('diff').textContent = r.diff || '(no changes)';
+  $('problems').innerHTML = ''; r.problems.forEach(p => $('problems').append(el('div', {class: 'banner'}, p)));
+  $('dlg').showModal();
+};
+$('cancel').onclick = () => $('dlg').close();
+$('confirm').onclick = async () => {
+  try { await api(`/api/sessions/${sid}/save`, {json: {sections, base}}); dirty = false; $('dlg').close(); $('meta').textContent = 'saved ' + new Date().toLocaleTimeString(); }
+  catch (e) { alert(e.message); }
+};
+$('export').onchange = async e => {
+  const kind = e.target.value; e.target.value = ''; if (!kind) return;
+  if (kind.startsWith('log') && dirty) return alert('Save first: exports contain only the approved log.');
+  location.href = `/api/sessions/${sid}/export/${kind}?save=true`;
+};
+$('delaudio').onclick = async () => {
+  if (!confirm('Delete all audio for this session? The transcript and log are kept, but click-to-listen stops working.')) return;
+  const r = await api(`/api/sessions/${sid}/audio`, {method: 'DELETE'}); draft.audio_deleted = true; alert(`Freed ${gb(r.freed)}.`);
+};
+window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+(async () => {
+  $('sid').textContent = sid;
+  const [d, t, m] = await Promise.all([api(`/api/sessions/${sid}/draft`), api(`/api/sessions/${sid}/transcript`), api(`/api/sessions/${sid}`)]);
+  draft = d; transcript = t; draft.audio_deleted = !!m.audio_deleted;
+  sections = structuredClone(d.saved_sections || d.sections);
+  $('meta').textContent = `${m.date} · ${d.model} · ${d.profile}` + (d.saved_sections ? ' · showing your saved version' : ' · unsaved draft');
+  renderDraft(); renderTranscript();
+})();
+</script></body></html>

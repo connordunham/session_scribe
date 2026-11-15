@@ -1,0 +1,31 @@
+# Home-server deployment (M3). Run `docker compose run --rm worker scribe setup`
+# once while online, then everything works with the network off.
+services:
+  api:
+    build: .
+    command: ["scribe", "serve"]
+    ports: ["8765:8765"]
+    environment:
+      SCRIBE_OLLAMA_HOST: http://ollama:11434
+      SCRIBE_PASSWORD: ${SCRIBE_PASSWORD:?set SCRIBE_PASSWORD - login is required beyond localhost}
+      # Browsers only allow the microphone over HTTPS off-localhost:
+      SCRIBE_SSL_CERT: /vault/certs/scribe.crt
+      SCRIBE_SSL_KEY: /vault/certs/scribe.key
+    volumes: ["./vault:/vault"]
+  worker:
+    build: .
+    command: ["scribe", "worker"]
+    environment:
+      SCRIBE_OLLAMA_HOST: http://ollama:11434
+    volumes: ["./vault:/vault"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: all, capabilities: [gpu]}]
+  ollama:
+    image: ollama/ollama:0.12.6
+    volumes: ["./vault/ollama:/root/.ollama"]
+    deploy:
+      resources:
+        reservations:
+          devices: [{driver: nvidia, count: all, capabilities: [gpu]}]

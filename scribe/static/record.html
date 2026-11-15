@@ -1,0 +1,130 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Session Scribe · Record</title><link rel="stylesheet" href="/app.css"><script src="/common.js"></script></head><body>
+<header><h1><a href="/index.html">Session Scribe</a> · Record</h1><span id="sid" class="muted"></span></header>
+<main>
+<div id="warn"></div>
+<div class="card"><h2>Sources</h2>
+  <div class="row"><label>Microphone <select id="mic"></select></label>
+  <label><input type="checkbox" id="call"> Also capture call audio (tab or system)</label>
+  <label title="Turn off browser echo cancellation / noise suppression / auto gain. Try for a single table mic."><input type="checkbox" id="raw"> Raw mic</label></div>
+  <p class="muted">Call audio: pick the call's browser tab (or the whole screen) and tick "share audio". Tab audio works in Chrome and Edge; system audio only on some setups. If it fails, record the call in its own app and import the file afterwards.</p>
+</div>
+<div class="card">
+  <div class="row"><span class="big" id="clock">00:00:00</span><div class="meter"><div id="lvl"></div></div></div>
+  <div class="row" style="margin-top:12px">
+    <button class="primary" id="start">● Start</button><button id="pause" disabled>Pause</button>
+    <button id="bookmark" disabled title="Shortcut: B">★ Bookmark (B)</button><button class="danger" id="stop" disabled>■ Stop</button>
+  </div>
+  <p class="muted" id="state">Ready.</p>
+  <ul id="bms"></ul>
+</div>
+</main>
+<script>
+const qs = new URLSearchParams(location.search);
+// R3: ~10-minute segments. ?segment_s= exists so rotation can be tested without waiting 10 minutes.
+const SEGMENT_MS = (Number(qs.get('segment_s')) || 600) * 1000;
+const CHUNK_MS = 5000;                 // upload granularity: a closed tab loses ~5 s
+let sid = qs.get('sid'), state = 'idle', ctx, dest, analyser, streams = [], rec = null, segIndex = 0, segStartElapsed = 0;
+let elapsedBase = 0, runStart = 0, wakeLock = null, queue = [], uploading = false, sent = {}, rotateTimer = null;
+const $ = id => document.getElementById(id);
+const elapsed = () => elapsedBase + (state === 'recording' ? (performance.now() - runStart) / 1000 : 0);
+const mime = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm', 'audio/mp4'].find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+
+async function listMics() {
+  try { (await navigator.mediaDevices.getUserMedia({audio: true})).getTracks().forEach(t => t.stop()); } catch (e) { warn('Microphone access denied: ' + e.message + (isSecureContext ? '' : ' (this page is not on localhost/HTTPS, so browsers block the mic)'), true); }
+  const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+  $('mic').innerHTML = ''; devs.forEach(d => $('mic').append(el('option', {value: d.deviceId}, d.label || 'Microphone')));
+}
+function warn(msg, bad) { $('warn').append(el('div', {class: 'banner' + (bad ? ' bad' : '')}, msg)); }
+
+async function setupAudio() {
+  ctx = new AudioContext(); dest = ctx.createMediaStreamDestination(); analyser = ctx.createAnalyser(); analyser.fftSize = 1024;
+  const raw = $('raw').checked;
+  const mic = await navigator.mediaDevices.getUserMedia({audio: {deviceId: $('mic').value ? {exact: $('mic').value} : undefined, echoCancellation: !raw, noiseSuppression: !raw, autoGainControl: !raw}});
+  streams.push(mic);
+  const sources = [ctx.createMediaStreamSource(mic)];
+  if ($('call').checked) {
+    const disp = await navigator.mediaDevices.getDisplayMedia({video: true, audio: true});
+    disp.getVideoTracks().forEach(t => t.stop());
+    if (!disp.getAudioTracks().length) warn('No call audio was shared (tick "share audio" when choosing the tab). Recording the mic only.', true);
+    else { streams.push(disp); sources.push(ctx.createMediaStreamSource(disp)); }
+  }
+  // Mic and call audio are mixed into one stream: v1 assumes one mixed track (open question 1 default).
+  sources.forEach(s => { s.connect(dest); s.connect(analyser); });
+  const buf = new Float32Array(analyser.fftSize);
+  (function meter() { analyser.getFloatTimeDomainData(buf); let p = 0; for (const v of buf) p = Math.max(p, Math.abs(v)); $('lvl').style.width = Math.min(100, p * 140) + '%'; $('lvl').style.background = p > 0.95 ? 'var(--bad)' : 'var(--ok)'; requestAnimationFrame(meter); })();
+}
+
+function startSegment() {
+  const index = segIndex++, offset = elapsed();
+  segStartElapsed = offset; sent[index] = {pos: 0, offset};
+  const r = new MediaRecorder(dest.stream, {mimeType: mime, audioBitsPerSecond: 48000});
+  r.ondataavailable = e => { if (e.data.size) { queue.push({index, blob: e.data}); pump(); } };
+  r.onstop = () => { queue.push({index, finish: true, duration: (r._end ?? elapsed()) - offset}); pump(); };
+  r.start(CHUNK_MS); rec = r;
+  clearTimeout(rotateTimer); rotateTimer = setTimeout(rotate, SEGMENT_MS);
+}
+function rotate() {
+  if (state !== 'recording') { rotateTimer = setTimeout(rotate, 5000); return; }
+  const old = rec; old._end = elapsed(); startSegment(); old.stop();
+}
+async function pump() {
+  if (uploading) return; uploading = true;
+  while (queue.length) {
+    const job = queue[0];
+    try {
+      if (job.finish) await api(`/api/sessions/${sid}/segments/${job.index}/finish`, {json: {duration: job.duration}});
+      else {
+        const s = sent[job.index];
+        const r = await api(`/api/sessions/${sid}/segments/${job.index}?pos=${s.pos}&offset=${s.offset}&mime=${encodeURIComponent(mime)}`, {method: 'PUT', body: job.blob});
+        s.pos = r.size;
+      }
+      queue.shift(); $('state').textContent = state === 'recording' ? `Recording · segment ${segIndex} · uploads up to date` : $('state').textContent;
+    } catch (e) {
+      $('state').textContent = `Upload retrying (${queue.length} pending): ${e.message}`;
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
+  uploading = false;
+}
+async function keepAwake() { try { if ('wakeLock' in navigator && state === 'recording') wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { /* not fatal */ } }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') keepAwake(); });
+
+$('start').onclick = async () => {
+  if (!mime) return warn('This browser cannot record audio (MediaRecorder unsupported).', true);
+  try { await setupAudio(); } catch (e) { return warn('Could not start audio: ' + e.message, true); }
+  if (sid) { const r = await api(`/api/sessions/${sid}/elapsed`); elapsedBase = r.elapsed; segIndex = r.next_index; await api(`/api/sessions/${sid}/status`, {json: {status: 'recording'}}); }
+  else { const m = await api('/api/sessions', {json: {}}); sid = m.id; history.replaceState(null, '', `?sid=${sid}`); }
+  $('sid').textContent = sid; state = 'recording'; runStart = performance.now(); startSegment(); keepAwake();
+  $('start').disabled = true; ['pause', 'bookmark', 'stop'].forEach(i => $(i).disabled = false);
+  (await api(`/api/sessions/${sid}`)).bookmarks.forEach(addBm);
+};
+$('pause').onclick = async () => {
+  if (state === 'recording') { elapsedBase = elapsed(); state = 'paused'; rec.pause(); $('pause').textContent = 'Resume'; $('state').textContent = 'Paused.'; await api(`/api/sessions/${sid}/status`, {json: {status: 'paused'}}); }
+  else { state = 'recording'; runStart = performance.now(); rec.resume(); $('pause').textContent = 'Pause'; await api(`/api/sessions/${sid}/status`, {json: {status: 'recording'}}); }
+};
+function addBm(b) { $('bms').append(el('li', {}, `${fmt(b.t)} — ${b.label}`)); }
+async function bookmark() {
+  if (state === 'idle' || !sid) return;
+  const t = elapsed(); const label = prompt('Bookmark label (optional)', '') ?? '';
+  addBm(await api(`/api/sessions/${sid}/bookmarks`, {json: {t, label: label || 'Bookmark'}}));
+}
+$('bookmark').onclick = bookmark;
+document.addEventListener('keydown', e => { if ((e.key === 'b' || e.key === 'B') && !e.ctrlKey && !e.metaKey && !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) { e.preventDefault(); bookmark(); } });
+$('stop').onclick = async () => {
+  if (!confirm('Stop recording and start processing?')) return;
+  if (state === 'recording') elapsedBase = elapsed();
+  state = 'stopping'; clearTimeout(rotateTimer); rec._end = elapsedBase; rec.stop(); streams.forEach(s => s.getTracks().forEach(t => t.stop()));
+  $('state').textContent = 'Finishing uploads…';
+  await new Promise(r => { const t = setInterval(() => { if (!queue.length && !uploading) { clearInterval(t); r(); } }, 300); });
+  await api(`/api/sessions/${sid}/stop`, {method: 'POST'});
+  state = 'idle'; if (wakeLock) wakeLock.release();
+  $('state').textContent = 'Stopped. Transcription is queued; you can close this page.';
+  ['pause', 'bookmark', 'stop'].forEach(i => $(i).disabled = true);
+};
+window.addEventListener('beforeunload', e => { if (state === 'recording' || state === 'paused' || queue.length) { e.preventDefault(); e.returnValue = ''; } });
+setInterval(() => { $('clock').textContent = fmt(elapsed()); }, 250);
+setInterval(async () => { try { const s = await api('/api/status'); if (s.disk_low && !$('warn').dataset.disk) { $('warn').dataset.disk = 1; warn(`Low disk space: ${gb(s.disk_free)} free.`, true); } } catch (e) {} }, 30000);
+if (sid) { $('sid').textContent = sid + ' (resuming)'; $('start').textContent = '● Resume recording'; }
+listMics();
+</script></body></html>

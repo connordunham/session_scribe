@@ -1,0 +1,81 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Session Scribe</title><link rel="stylesheet" href="/app.css"><script src="/common.js"></script></head><body>
+<header><h1>Session Scribe</h1><span id="ready" class="muted">checking…</span><span class="muted" id="disk"></span>
+<label class="row" style="margin-left:auto">Profile <select id="profile"></select></label></header>
+<main>
+<div id="unfinished"></div>
+<div class="card"><h2>New session</h2>
+  <div class="row"><a class="btn primary" href="/record.html">● Record</a>
+  <span class="muted">or import a recording:</span></div>
+  <form id="imp" class="row" style="margin-top:10px">
+    <input type="file" name="files" accept="audio/*,video/*,.m4a,.mp3,.wav,.ogg,.flac,.webm" multiple required>
+    <input name="date" type="date" title="Session date">
+    <input name="number" type="number" min="1" placeholder="Session no. (auto)" style="width:150px">
+    <button>Import</button>
+    <span class="muted">Several files = one track per speaker (named after the file).</span>
+  </form><p id="impmsg" class="muted"></p>
+</div>
+<div class="card"><h2>Sessions</h2><table><thead><tr><th>Session</th><th>Date</th><th>Status</th><th></th></tr></thead><tbody id="sessions"></tbody></table></div>
+<div class="card"><h2>Offline readiness</h2>
+  <p class="muted">Run this before you leave the internet behind. Green only if everything is local.</p>
+  <div class="row"><button id="runcheck">Run check</button><button id="mictest">Test recording (3 s)</button><span id="micmsg" class="muted"></span></div>
+  <table id="checks" style="margin-top:10px"></table>
+</div>
+</main>
+<script>
+async function loadStatus() {
+  const s = await api('/api/status');
+  const sel = document.getElementById('profile'); sel.innerHTML = '';
+  for (const [n, d] of Object.entries(s.profiles)) sel.append(el('option', {value: n, title: d, ...(n === s.profile ? {selected: ''} : {})}, n));
+  document.getElementById('disk').textContent = gb(s.disk_free) + ' free';
+  document.getElementById('disk').className = s.disk_low ? 'bad' : 'muted';
+  const u = document.getElementById('unfinished'); u.innerHTML = '';
+  for (const m of s.unfinished) u.append(el('div', {class: 'banner'}, `${m.id} was still recording when it stopped (tab closed or computer slept). Audio up to the last upload is safe. `,
+    el('a', {class: 'btn', href: `/record.html?sid=${m.id}`}, 'Resume recording'), ' ',
+    el('button', {onclick: async () => { await api(`/api/sessions/${m.id}/stop`, {method: 'POST'}); refresh(); }}, 'Finish and process')));
+}
+async function loadSessions() {
+  const tb = document.getElementById('sessions'); tb.innerHTML = '';
+  for (const m of (await api('/api/sessions')).reverse()) {
+    const st = m.status + (m.progress ? ` (${m.progress})` : '') + (m.error ? ` — ${m.error}` : '');
+    tb.append(el('tr', {}, el('td', {}, m.id), el('td', {}, m.date), el('td', {class: m.status === 'error' ? 'bad' : ''}, st),
+      el('td', {}, ['drafted', 'saved'].includes(m.status) ? el('a', {class: 'btn', href: `/review.html?sid=${m.id}`}, 'Review') : null, ' ',
+        m.status === 'error' ? el('button', {onclick: async () => { await api(`/api/sessions/${m.id}/retry`, {method: 'POST'}); refresh(); }}, 'Retry') : null)));
+  }
+}
+async function runCheck() {
+  const t = document.getElementById('checks'); t.innerHTML = '<tr><td>checking…</td></tr>';
+  const r = await api('/api/readiness');
+  t.innerHTML = '';
+  for (const c of r.checks) t.append(el('tr', {}, el('td', {class: c.ok ? 'ok' : 'bad'}, c.ok ? '✓' : '✗'), el('td', {}, c.name), el('td', {class: 'muted'}, c.detail, c.fix ? el('div', {class: 'warn'}, c.fix) : null)));
+  const rd = document.getElementById('ready'); rd.textContent = r.ready ? '● offline ready' : '● not offline-ready'; rd.className = r.ready ? 'ok' : 'bad';
+}
+document.getElementById('runcheck').onclick = runCheck;
+document.getElementById('mictest').onclick = async () => {
+  const msg = document.getElementById('micmsg');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+    const rec = new MediaRecorder(stream); const parts = [];
+    rec.ondataavailable = e => parts.push(e.data);
+    msg.textContent = 'recording… say something';
+    rec.start(); await new Promise(r => setTimeout(r, 3000)); rec.stop();
+    await new Promise(r => rec.onstop = r); stream.getTracks().forEach(t => t.stop());
+    const r = await api('/api/readiness/mic', {method: 'POST', body: new Blob(parts, {type: rec.mimeType})});
+    msg.textContent = r.ok ? `ok (${r.duration.toFixed(1)} s decoded)` : 'failed: the server could not decode the recording';
+    msg.className = r.ok ? 'ok' : 'bad'; runCheck();
+  } catch (e) { msg.textContent = 'microphone unavailable: ' + e.message; msg.className = 'bad'; }
+};
+document.getElementById('profile').onchange = async e => { const r = await api('/api/profile', {json: {name: e.target.value}}); alert(r.note); };
+document.getElementById('imp').onsubmit = async e => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const files = e.target.files.files;
+  if (files.length > 1) for (const f of files) fd.append('speakers', f.name.replace(/\.[^.]+$/, ''));
+  document.getElementById('impmsg').textContent = 'uploading…';
+  try { const m = await api('/api/sessions/import', {method: 'POST', body: fd}); document.getElementById('impmsg').textContent = `${m.id} imported; splitting and queuing for transcription.`; e.target.reset(); }
+  catch (err) { document.getElementById('impmsg').textContent = 'import failed: ' + err.message; }
+  refresh();
+};
+function refresh() { loadStatus(); loadSessions(); }
+refresh(); runCheck(); setInterval(loadSessions, 5000);
+</script></body></html>

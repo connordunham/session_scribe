@@ -1,0 +1,39 @@
+# Hardware profiles. Switching profile is the one setting `active` (or the
+# SCRIBE_PROFILE environment variable). Prompts, chunk sizes and context limits
+# are all read from here, so the same code runs on 8 GB now and 24 GB later.
+#
+# Model tags are taken from the design spec (Nov 2026 third-party rankings).
+# They are NOT verified here: run `ollama pull <tag>` while online, and let the
+# M0 bake-off pick the default. Pin exact tags once chosen.
+active: test-8gb
+ollama_host: http://127.0.0.1:11434
+
+profiles:
+  test-8gb:
+    description: "8 GB VRAM / 16 GB RAM test machine (RTX 2060/2070 class)"
+    stt_model: large-v3-turbo
+    stt_fallback_model: distil-large-v3
+    stt_device: cuda
+    stt_compute_type: int8_float16
+    llm_model: gemma4:12b
+    llm_context: 16384
+    # Partial CPU offload is accepted on the test tier (speed is not a goal).
+    # null lets Ollama decide how many layers fit on the GPU.
+    llm_num_gpu: null
+    chunk_minutes: 12
+    chunk_tokens: 3500
+    reduce_input_tokens: 9000
+    max_output_tokens: 3000
+  target-24gb:
+    description: "RTX 3090, 24 GB VRAM"
+    stt_model: large-v3-turbo
+    stt_fallback_model: large-v3
+    stt_device: cuda
+    stt_compute_type: float16
+    llm_model: qwen3.8:27b
+    llm_context: 32768
+    llm_num_gpu: null
+    chunk_minutes: 12
+    chunk_tokens: 3500
+    reduce_input_tokens: 20000
+    max_output_tokens: 4000
