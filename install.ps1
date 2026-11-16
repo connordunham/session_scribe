@@ -52,7 +52,8 @@ elseif ((Test-Path $InstallDir) -and (Get-ChildItem -Force $InstallDir | Where-O
 else {
     $vaultBackup = $null
     if (Test-Path "$InstallDir\vault") { $vaultBackup = "$InstallDir.vault-tmp"; Move-Item "$InstallDir\vault" $vaultBackup }
-    if (Test-Path $InstallDir) { Remove-Item $InstallDir }
+    # Clone into the folder as-is: git accepts an existing empty folder, and
+    # deleting it fails when the shell is sitting in it.
     git clone $Repo "$InstallDir"; Check 'git clone'
     if ($vaultBackup) { Move-Item $vaultBackup "$InstallDir\vault" }
 }
