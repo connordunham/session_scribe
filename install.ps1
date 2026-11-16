@@ -28,11 +28,19 @@ foreach ($p in @(@{cmd = 'git'; id = 'Git.Git' }, @{cmd = 'ffmpeg'; id = 'Gyan.F
 
 # Use the py launcher, not `python`: on a fresh Windows `python` is a
 # Microsoft Store stub that opens the Store instead of running anything.
+# Windows PowerShell 5.1 turns a native command's redirected stderr into an
+# error record, which $ErrorActionPreference = 'Stop' makes fatal. A probe that
+# is expected to fail ("No suitable Python runtime found") must not stop us.
+function PyOk($v) {
+    $old = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { & py "-$v" -c "1" *> $null; return ($LASTEXITCODE -eq 0) } catch { return $false } finally { $ErrorActionPreference = $old }
+}
 $PyVer = $null
-if (Have py) { foreach ($v in '3.12', '3.11', '3.10') { & py "-$v" -c "1" 2>$null; if ($LASTEXITCODE -eq 0) { $PyVer = "-$v"; break } } }
+if (Have py) { foreach ($v in '3.12', '3.11', '3.10') { if (PyOk $v) { $PyVer = "-$v"; break } } }
 if (-not $PyVer) {
     winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements; Check 'winget install Python'
     Refresh-Path; $PyVer = '-3.12'
+    if (-not (PyOk '3.12')) { throw 'Python 3.12 was installed but py cannot find it yet. Close PowerShell, open a new one, and run this again.' }
 }
 foreach ($c in 'git', 'ffmpeg', 'py') { if (-not (Have $c)) { throw "$c is installed but not on PATH yet. Close PowerShell, open a new one, and run this again." } }
 
