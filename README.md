@@ -37,6 +37,18 @@ Everything lives in one folder, the **vault** (`$SCRIBE_VAULT`, default `./vault
 
 ## Install (do this while online)
 
+**Windows, one step:** in PowerShell run
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+irm https://raw.githubusercontent.com/connordunham/session_scribe/main/install.ps1 | iex
+```
+
+That installs everything into `Documents\DND SCRIBE` and puts a **Session
+Scribe** shortcut on the desktop. To pick another folder, download the
+script and run `.\install.ps1 "D:\Scribe"`. The manual steps are
+below.
+
 Requirements: Python 3.10+, ffmpeg on PATH, [Ollama](https://ollama.com), and an
 Nvidia GPU with a recent driver (Windows or Linux).
 
